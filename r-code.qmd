@@ -1,0 +1,1036 @@
+---
+title: "Interest in booter services and DDoS attacks"
+subtitle: "Insight from Google search data"
+author: 
+  - name: Asier Moneva
+    affiliation: "^1^ Netherlands Institute for the Study of Crime and Law Enforcement (NSCR); ^2^ Center of Expertise Cyber Security, The Hague University of Applied Sciences"
+    orcid: 0000-0002-2156-0213
+  - name: Rutger Leukfeldt
+    affiliation: "^1^ Netherlands Institute for the Study of Crime and Law Enforcement (NSCR); ^2^ Center of Expertise Cyber Security, The Hague University of Applied Sciences; ^3^ Institute of Security and Global Affairs & Institute of Criminal Law and Criminology, Leiden University"
+    orcid: 0000-0002-3051-0859
+date: "`r Sys.Date()`"
+number-sections: true
+format: 
+  html: default
+  docx: 
+    toc: false
+    prefer-html: true
+  pdf: 
+    toc: false
+editor: source
+bibliography: references.bib
+csl: sage-harvard.csl
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+# Chunk options
+knitr::opts_chunk$set(echo = FALSE)
+
+options(
+  # Hide NAs in tables
+  knitr.kable.NA = "",
+  # Avoid scientific notation
+  scipen = 999
+)
+```
+
+```{r}
+#| label: packages
+#| message: false
+
+{
+  library(broom)
+  library(cld2)
+  library(cld3)       
+  library(ggraph)
+  library(here)
+  library(igraph)
+  library(janitor)
+  library(knitr)
+  library(kableExtra)
+  library(patchwork)
+  library(tidytext)
+  library(tidyverse)
+}
+
+# Set the ggplot2 theme
+ggplot2::theme_set(theme_classic())
+```
+
+# Abstract {.unnumbered}
+
+# Keywords {.unnumbered}
+
+# Introduction
+
+# How do booters work and who might want to hire them?
+
+# The present study
+
+## Data
+
+```{r}
+#| label: import-googleads
+
+# Campaigns data in`csv`
+df_campaigns <- read_csv(
+  file = here("data", "osf", "df_campaigns.csv"),
+  col_types = "Dnnnnc"
+) 
+
+
+# Audience data in `csv`
+df_audience <- read_csv(
+  file = here("data", "osf", "df_audience.csv"),
+  show_col_types = FALSE
+)
+
+# Searches data in `.csv`
+df_searches <- read_csv(
+  file = here("data", "osf", "df_searches.csv"),
+  show_col_types = FALSE
+)
+```
+
+```{r}
+#| label: aggregate-audiences
+#| message: false
+
+# Aggregate the interaction figures by campaign, gender, and age
+df_audience_aggr <- df_audience |> 
+  pivot_longer(
+    cols = clicks:impr,
+    names_to = "type",
+    values_to = "value"
+  ) |> 
+  # Count interactions
+  group_by(age, gender, campaign_n, type) |> 
+  summarize(value_aggr = sum(value)) |> 
+  ungroup() |> 
+  # Calculate percentages
+  group_by(age, campaign_n, type) |> 
+  mutate(value_aggr_p = round((value_aggr / sum(value_aggr)) * 100, 1)) |> 
+  ungroup() |> 
+  # Arrange the table
+  arrange(campaign_n, desc(type))
+```
+
+```{r}
+#| label: tbl-campaigns-summary
+#| tbl-cap: Summarized information about the campaigns
+
+# Summarize the data
+tbl_campaigns <- df_campaigns |> 
+  group_by(campaign) |> 
+  summarize(
+    date_start = min(date),
+    date_end = max(date),
+    impressions_sum = sum(impressions),
+    clicks_sum = sum(clicks),
+    cost_sum = sum(cost),
+    cpc_min = min(avg_cpc),
+    cpc_max = max(avg_cpc)
+  ) |> 
+  ungroup() |> 
+  mutate(
+    campaign = case_match(
+      campaign,
+      "one" ~ "First",
+      "two" ~ "Second"
+    ),
+    duration = as.numeric(date_end - date_start) + 1,
+    cpc_range = paste(cpc_min, cpc_max, sep = " - "),
+  ) |> 
+  adorn_totals() |> 
+  tibble() |> 
+  select(
+    campaign:date_end,
+    duration,
+    impressions_sum:cost_sum,
+    cpc_range
+  )
+
+# Display the data in a table
+tbl_campaigns |> 
+  kable(col.names = c("Campaign", "Start date", "End date", "Duration (days)", "Impressions", "Clicks", "Cost (€)", "Cost per click range")) |> 
+  row_spec(2, hline_after = TRUE) |> 
+  row_spec(3, bold = TRUE)
+```
+
+```{r}
+#| label: data-discrepancy
+
+# Calculate data discrepancies in the First campaign between audience and campaign datasets
+df_discrepancies <- tibble(
+  # Impressions in audiences (First campaign)
+  impr_aud = df_audience_aggr |> filter(campaign_n == "one" & type == "impr") |> summarize(sum(value_aggr)) |> pull(),
+  # Impressions in campaigns (First campaign)
+  impr_cam = tbl_campaigns |> filter(campaign == "First") |> pull(impressions_sum),
+  # Clicks in audiences (First campaign)
+  clicks_aud = df_audience_aggr |> filter(campaign_n == "one" & type == "clicks") |> summarize(sum(value_aggr)) |> pull(),
+  # Clicks in campaigns (First campaign)
+  clicks_cam = tbl_campaigns |> filter(campaign == "First") |> pull(clicks_sum)
+) |> 
+  mutate(
+    impr_disc = round((1 - (impr_aud / impr_cam)) * 100, 1),
+    clicks_disc = round((1 - (clicks_aud / clicks_cam)) * 100, 1),
+  )
+```
+
+## The campaigns
+
+```{r}
+#| label: campaigns-correlation
+
+df_campaigns_annotation <- df_campaigns |>  
+  select(
+    - avg_cpc,
+    - cost
+  ) |> 
+  group_by(campaign) |>  
+  mutate(cor = cor(
+    x = clicks,
+    y = impressions,
+    # Calculate the linear correlation for each campaign
+    method = "pearson"
+  )) |> 
+  slice_head(n = 1) |> 
+  # Adjust the position of the date labels
+  ungroup() |>
+  arrange(date)
+
+# Detailed tests
+cor_campaign_one <- cor.test(
+  x = df_campaigns |> filter(campaign == "one") |> pull(impressions), 
+  y = df_campaigns |> filter(campaign == "one") |> pull(clicks)
+)
+cor_campaign_two <- cor.test(
+  x = df_campaigns |> filter(campaign == "two") |> pull(impressions), 
+  y = df_campaigns |> filter(campaign == "two") |> pull(clicks)
+)
+```
+
+```{r}
+#| label: date-objects
+#| message: false
+
+# Vector
+# All dates
+v_dates <- as_date(as_date("2021-01-01"):as_date("2021-12-02"))
+# Median dates per campaign
+v_dates_mdn <- df_campaigns |> 
+  group_by(campaign, country) |>  
+  summarize(date = median(date)) |> 
+  ungroup() |> 
+  arrange(date) |> 
+  pull(date)
+
+# Tibble
+df_dates <- tibble(date = v_dates)
+```
+
+```{r}
+#| label: bind-campaign-dates
+
+df_campaigns_dates <- df_campaigns |> 
+  select(
+    - avg_cpc,
+    - cost
+  ) |> 
+  pivot_longer(
+    cols = clicks:impressions,
+    values_to = "value",
+    names_to = "interaction"
+  )
+```
+
+```{r}
+#| label: fig-campaigns
+#| fig-cap: Campaign activity and interaction metrics by country
+#| fig-height: 3
+#| fig-width: 8
+
+# Declare `geom_text()` vector of heights
+v_text_h <- c(3000, 3000)
+
+# Plot the interaction generated by the ads per campaign
+fig_interaction <- df_campaigns_dates |>
+  drop_na() |> 
+  ggplot(mapping = aes(
+    x = date,
+    y = value
+  )) +
+  geom_line(mapping = aes(linetype = interaction)) +
+  geom_text(
+    data = df_campaigns_annotation,
+    mapping = aes(x = v_dates_mdn, y = v_text_h),
+    color = "black",
+    label = paste0("italic(r) ==", round(pull(df_campaigns_annotation, cor), 3)),
+    parse = TRUE
+    ) +
+  scale_x_date(date_labels = "%b\n%Y") +
+  scale_linetype(name = "Type of interaction") +
+  labs(
+    x = NULL,
+    y = "Interaction"
+  ) +
+  facet_wrap(
+    facets = vars(campaign),
+    scales = "free_x",
+    labeller = as_labeller(c(
+      "one" = "First campaign",
+      "two" = "Second campaign"
+    ))
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    axis.title.y = element_text(
+      angle = 0,
+      vjust = .5
+    )
+  )
+print(fig_interaction)
+```
+
+## The audiences
+
+```{r}
+#| label: tbl-interaction
+#| tbl-cap: Interaction with the online ads by campaign, age group, and gender
+
+df_audience_aggr |> 
+  pivot_wider(
+    names_from = age,
+    values_from = value_aggr:value_aggr_p
+  ) |>
+  select(
+    gender,
+    "value_aggr_18 - 24",
+    "value_aggr_p_18 - 24",
+    "value_aggr_25 - 34",
+    "value_aggr_p_25 - 34",
+    "value_aggr_unknown",
+    "value_aggr_p_unknown"
+  ) |> 
+  kable(col.names = c("Gender", "n", "%", "n", "%", "n", "%")) |> 
+  add_header_above(c(" " = 1, "18 - 24" = 2,  "25 - 34" = 2, "Unknown" = 2)) |> 
+  add_header_above(c(" " = 1, "Age interval" = 6)) |> 
+  pack_rows("First campaign", 1, 6) |> 
+  pack_rows("Impressions", 1, 3) |> 
+  pack_rows("Clicks", 4, 6) |>
+  pack_rows("Second campaign", 7, 12) |> 
+  pack_rows("Impressions", 7, 9) |>
+  pack_rows("Clicks", 10, 12)
+```
+
+```{r}
+#| label: audience-aggr
+#| message: false
+
+# Calculate the aggregated frequencies of interaction by age, gender, and type
+df_audience_aggr_ <- df_audience_aggr |> 
+  group_by(age, gender, type) |> 
+  summarize(value_aggr_sum = sum(value_aggr)) |> 
+  ungroup() |> 
+  group_by(type) |>
+  mutate(value_aggr_p = round((value_aggr_sum / sum(value_aggr_sum)) * 100, 1)) |> 
+  ungroup()
+
+# Calculate the aggregated frequencies of interaction by age, and type
+df_audience_aggr_age <- df_audience_aggr_ |> 
+  group_by(type, age) |> 
+  summarize(value_aggr_sum_ = sum(value_aggr_sum)) |> 
+  mutate(value_aggr_p_ = round((value_aggr_sum_ / sum(value_aggr_sum_)) * 100, 1)) |> 
+  ungroup()
+```
+
+## The searches
+
+```{r}
+#| label: tidy-searches
+#| message: false
+
+# Declare generic English words or company names for language detection
+stopwords_lang <- c("amazon", "apache", "apex legends", "api", "app", "ark", "asus", "aws", "azure", "blizzard", "booter", "booters", "bot", "call of duty", "cloudflare", "cmd", "cs", "csgo", "ddos", "discord", "dns", "fortnite", "github", "google", "gta", "hardware", "internet", "ip", "kali linux", "kaspersky", "linux", "mac", "microsoft", "minecraft", "mirai", "overwatch", "paypal", "plugin", "pc", "playstation", "ps4", "python", "ransomware", "raspberry", "raspberry pi", "software", "stresser", "stressers", "telegram", "tcp", "termux", "twitter", "syn", "ubuntu", "vpn", "vps", "'web'", "wifi", "wikipedia", "windows", "wordpress", "xbox", "youtube", "zoom", "[:digit:]", "[:punct:]")
+
+df_searches_ <- df_searches |> 
+  # Use campaign as umbrella category for the analyses
+  group_by(campaign_n, search_term) |>
+  # Count how many times each term was searched
+  summarize(sum_impr = sum(impr)) |>
+  ungroup() |>
+  # Spread the rows based on how many times each term was searched
+  uncount(weights = sum_impr) |> 
+  mutate(
+    id_term = row_number(), .before = campaign_n,
+    # Create a variable for language detection
+    search_term_lang = str_remove_all(
+      string = search_term,
+      pattern = paste(stopwords_lang, collapse = "|")
+    ),
+    search_term_lang = str_trim(search_term_lang, side = "both"),
+    search_term_lang = na_if(search_term_lang, ""),
+    language2 = cld2::detect_language(search_term_lang),
+    language3 = cld3::detect_language(search_term_lang)
+  )
+```
+
+```{r}
+#| label: tokenize-words
+
+# Tokenize the search terms
+df_searches_tidy <- df_searches_ |> 
+  unnest_tokens(
+    output = word,
+    input = search_term,
+    token = "words"
+  )
+```
+
+```{r}
+#| label: stopwords-term
+
+# Retrieve a list of Dutch stopwords
+stopwords_nl <- tibble(nl = "aan al alles als altijd andere ben bij daar dan dat de der deze die dit doch doen door dus een eens en er ge geen geweest haar had heb hebben heeft hem het hier hij hoe hun iemand iets ik in is ja je kan kon kunnen maar me meer men met mij mijn moet na naar niet niets nog nu of om omdat onder ons ook op over reeds te tegen toch toen tot u uit uw van veel voor want waren was wat werd wezen wie wil worden wordt zal ze zelf zich zij zijn zo zonder zou") |> 
+  unnest_tokens(
+    output = word,
+    input = nl,
+    token = "words"
+  ) 
+
+df_searches_tidy_sw <- df_searches_tidy |> 
+  # Remove English stopwords
+  anti_join(
+    # Provide a reference for the Snowball stopwords <https://github.com/wollmers/Lingua-StopWords>
+    y = stop_words |> filter(lexicon == "snowball"), 
+    by = "word"
+  ) |> 
+  # Remove the Dutch stop words
+  anti_join(
+    y = stopwords_nl,
+    by = "word"
+  )
+```
+
+```{r}
+#| label: fig-word-freq
+#| fig-cap: Term frequency by campaign
+
+fig_word_freq <- df_searches_tidy_sw |> 
+  group_by(campaign_n) |> 
+  count(word, sort = TRUE) |> 
+  slice_head(n = 20) |>
+  ungroup() |> 
+  ggplot(mapping = aes(
+    x = n,
+    y = reorder_within(
+      x = word, 
+      by = n, 
+      within = campaign_n
+    )
+  )) +
+  geom_col() +
+  scale_y_reordered() +
+  labs(
+    x = "Count",
+    y = NULL
+  ) +
+  facet_wrap(
+    facets = vars(campaign_n),
+    scales = "free_y",
+    labeller = as_labeller(c(
+      "one" = "First campaign",
+      "two" = "Second campaign"
+    ))
+  )
+print(fig_word_freq)
+```
+
+```{r}
+#| label: tbl-language
+#| tbl-cap: Distribution of languages detected in searches
+
+tbl_language <- df_searches_ |> 
+  mutate(
+    language = case_when(
+      is.na(search_term_lang) ~ search_term_lang,
+      nchar(search_term_lang) == 1 ~ NA_character_,
+      .default = language2
+    ),
+    language = str_extract(
+      string = language,
+      pattern = "[:alpha:]+"
+    )
+  ) |> 
+  count(language) |>
+  arrange(desc(n)) |> 
+  mutate(
+    language = case_match(
+      language,
+      "en" ~ "English",
+      "af" ~ "Afrikaans",
+      "nl" ~ "Dutch",
+    ),
+    p = round((n / sum(n)) * 100, 1)
+  ) |> 
+  slice_head(n = 3) |> 
+  replace_na(list(language = "Unknown"))
+
+# Declare values for an additional row containing the results for `Other` languages
+tbl_language_other <- tibble(
+  language = "Other",
+  n = nrow(df_searches_) - sum(tbl_language |> select(n)),
+  p = 100 - sum(tbl_language |> select(p))
+)
+
+# Display the results in a table
+tbl_language |> 
+  bind_rows(tbl_language_other) |> 
+  kable(col.names = c("Language", "n", "%")) |> 
+  add_header_above(c(" " = 1, "Frequency" = 2))
+```
+
+## Analytic strategy
+
+## Software
+
+# Results
+
+## Top searches
+
+```{r}
+#| label: keywords
+#| message: false
+
+# Create a function to identify the top search terms by a specific variable
+top_searches_by <- function(data, var) {
+  
+  data |> 
+    group_by(campaign_n, search_term) |> 
+    summarize(var_sum = sum({{var}})) |> 
+    slice_max(var_sum, n = 10) |> 
+    ungroup() |> 
+    arrange(campaign_n, desc(var_sum))
+  
+}
+
+# Top unique searches by accumulated impressions
+df_searches_top_impr <- df_searches |> top_searches_by(var = impr)
+
+# Top unique searches by accumulated clicks
+df_searches_top_clicks <- df_searches |> top_searches_by(var = clicks)
+
+# Top unique searches by accumulated CTR
+df_searches_top_ctr <- df_searches |> top_searches_by(var = ctr)
+
+# Top unique searches with at least 50 impressions by accumulated CTR 
+df_searches_top_ctr_ <- df_searches |> 
+  filter(impr > 49) |> 
+  group_by(campaign_n, search_term) |> 
+  summarize(var_sum = sum(ctr)) |> 
+  slice_max(var_sum, n = 10) |> 
+  ungroup() |> 
+  arrange(campaign_n, desc(var_sum))
+```
+
+```{r}
+#| label: tbl-keywords
+#| message: false
+#| tbl-cap: Top searches per campaign
+
+# Merge all top results
+bind_cols(
+  df_searches_top_impr,
+  df_searches_top_clicks,
+  df_searches_top_ctr,
+  df_searches_top_ctr_
+) |> 
+  mutate(rank = rep(x = 1:10, times = 2)) |> 
+  select(
+    rank,
+    search_term...2,
+    search_term...5,
+    search_term...8,
+    search_term...11
+  ) |> 
+  kable(col.names = c("Rank", "by impressions", "by clicks", "by CTR", "by CTR (with > 49 impressions)")) |> 
+  add_header_above(c(" " = 1, "Top searches" = 4)) |> 
+  pack_rows("First campaign", 1, 10) |> 
+  pack_rows("Second campaign", 11, 20)
+```
+
+## Term importance 
+
+```{r}
+#| label: tf-idf
+
+# Calculate the term frequency and inverse document frequency
+df_searches_tf_idf <- df_searches_tidy_sw |>
+  count(campaign_n, word) |> 
+  bind_tf_idf(
+    term = word,
+    document = campaign_n,
+    n = n
+  )
+```
+
+```{r}
+#| label: tokenize-bigrams
+
+# Tokenize the search terms into bigrams
+df_searches_bigrams <- df_searches_ |> 
+  unnest_tokens(
+    output = bigram,
+    input = search_term,
+    token = "ngrams",
+    n = 2
+  ) |> 
+  filter(!is.na(bigram))
+```
+
+```{r}
+#| label: stopwords-bigram
+
+df_searches_bigrams_sw <- df_searches_bigrams |> 
+  # Separate the terms for filtering
+  separate(
+    col = bigram,
+    into = c("term_1", "term_2"),
+    sep = " "
+  ) |> 
+  # Remove Dutch stopwords
+  filter(
+    !term_1 %in% pull(stopwords_nl, word) & 
+      !term_2 %in% pull(stopwords_nl, word)
+  ) |>
+  # Remove English stopwords
+  filter(
+    !term_1 %in% pull(stop_words |> filter(lexicon == "snowball"), word) & 
+      !term_2 %in% pull(stop_words |> filter(lexicon == "snowball"), word)
+  ) |> 
+  # Re-unite the bigrams
+  unite(
+    col = bigram,
+    term_1, term_2,
+    sep = " "
+  )
+```
+
+```{r}
+#| label: fig-tf-idf-bigrams
+#| fig-cap: Bigram TF-IDF by campaign
+
+fig_tfidf_bigrams <- df_searches_bigrams_sw |> 
+  count(campaign_n, bigram, sort = TRUE) |> 
+  bind_tf_idf(
+    term = bigram,
+    document = campaign_n,
+    n = n
+  ) |> 
+  group_by(campaign_n) |> 
+  arrange(desc(tf_idf)) |> 
+  slice_head(n = 20) |> 
+  ungroup() |> 
+  # Plot the results
+  ggplot(mapping = aes(
+    x = tf_idf,
+    y = fct_reorder(bigram, tf_idf)
+  )) +
+  geom_col() +
+  labs(
+    y = NULL,
+    x = "TF-IDF"
+  ) +
+  facet_wrap(
+    facets = vars(campaign_n),
+    scales = "free",
+    labeller = as_labeller(c(
+      "one" = "First campaign",
+      "two" = "Second campaign"
+    ))    
+  )
+print(fig_tfidf_bigrams)
+```
+
+## Relationships between terms
+
+```{r}
+#| label: graph-bigrams
+
+# Create a graph from the bigrams
+df_graph_bigrams <- df_searches_bigrams_sw |> 
+  separate(
+    col = bigram,
+    into = c("term_1", "term_2"),
+    sep = " "
+  ) |> 
+  count(campaign_n, term_1, term_2) |> 
+  # Bigrams searched at least 50 times
+  filter(n >= 50) |> 
+  relocate(campaign_n, .after = term_2)
+```
+
+```{r}
+#| label: graph-object
+
+# Extract vector names
+# V(graph_bigrams)$name
+
+# Manually assign values to each vector value
+# 0 = generic
+# 1 = gaming
+# 2 = booter
+v_category <- factor(
+  x = c(
+    # 22 (10 values)
+    0, 0, 0, 1, 1, 0, 2, 2, 2, 2,
+    # botnet (20 values)
+    0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+    # ip (30 values)
+    0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+    # prevent (40 values)
+    0, 0, 1, 0, 0, 0, 0, 0, 2, 0,
+    # stresser (50 values)
+    2, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+    # apparently (60 values)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    # prevention (70 values)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    # legends (80 values)
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    # someone (90 values)
+    0, 0, 0, 0, 2, 0, 0, 2, 0, 0,
+    # facebook (100 values)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    # mitigation (110 values)
+    0, 0, 0, 0, 0, 0
+  ),
+  levels = c("0", "1", "2"),
+  labels = c("generic", "gaming", "booter")
+)
+
+# Create the graph object
+graph_bigrams <- df_graph_bigrams |> 
+  graph_from_data_frame() |> 
+  set_vertex_attr(
+    name = "category",
+    value = v_category
+  )
+```
+
+```{r}
+#| label: fun-ggplot-graph
+
+# Create a function to plot graphs
+ggplot_graph <- function(graph) {  
+
+  graph |> 
+    ggraph(layout = "fr") +
+    geom_edge_link(
+      mapping = aes(edge_alpha = n),
+      arrow = arrow(
+        type = "closed",
+        length = unit(.1, "cm")
+      ),
+      end_cap = circle(.2, "cm"),
+      show.legend = FALSE
+    ) +
+    geom_node_point(
+      mapping = aes(
+        color = category,
+        shape = category
+      ),
+      alpha = .5,
+      size = 4
+    ) +
+    geom_node_text(
+      mapping = aes(label = name),
+      size = 2,
+      vjust = 1,
+      hjust = 1
+    ) +
+    scale_color_manual(
+      name = "Term category",
+      values = scales::viridis_pal()(3)
+    ) +
+    # scale_color_grey(name = "Term category") +
+    scale_shape_discrete(name = "Term category")
+  
+}
+```
+
+```{r}
+#| label: fig-graph-c1
+#| warning: false
+
+# Create a new subgraph based on the filtered edges of the first campaign
+v_edges_one <- which(E(graph_bigrams)$campaign_n == "one")
+graph_bigrams_one <- subgraph.edges(graph_bigrams, v_edges_one)
+
+# Set a seed for reproducibility
+set.seed(10)
+
+# Visualize the graph
+fig_graph_c1 <- graph_bigrams_one |>
+  ggplot_graph() +
+  labs(subtitle = "First campaign")
+```
+
+```{r}
+#| label: fig-graph-c2
+#| warning: false
+
+# Create a new subgraph based on the filtered edges of the first campaign
+v_edges_two <- which(E(graph_bigrams)$campaign_n == "two")
+graph_bigrams_two <- subgraph.edges(graph_bigrams, v_edges_two)
+
+# Set a seed for reproducibility
+set.seed(10)
+
+# Visualize the graph
+fig_graph_c2 <- graph_bigrams_two |>
+  ggplot_graph() +
+  labs(subtitle = "Second campaign")
+```
+
+```{r}
+#| label: fig-graph
+#| fig-cap: Directed graph of the bigrams searched at least 50 times by campaign
+#| fig-height: 8
+
+fig_graph <- fig_graph_c1 / 
+  fig_graph_c2 +
+  plot_layout(guides = "collect") +
+  plot_annotation(caption = "Translations from Dutch (to English): aanval/aanvallen (attack/attacks),betekenis (meaning), bedrijven (companies), \nbooten (to 'boot'), ddossen (to 'DDoS'), kopen (to buy), maart (March), nieuws (news), straf/strafbaar (punishment/punishable), \nuitvoeren (to perform), vaandag (today), voorkomen (to prevent).") &
+  theme(legend.position = "bottom")
+print(fig_graph)
+```
+
+## Booters 
+
+<!-- The code in this section does not produce meaningful results with the anonymized data set. -->
+
+```{r}
+#| label: booter-list
+
+# # Declare booter stopwords
+# v_stopwords_booter <- c("2020", "2021", "aanval", "account", "address", "adres", "andriod", "anonymous", "api", "app", "ark", "attack", "бесплатно", "best", "board", "bot", "botnet", "buy", "cheap", "cloudfare", "clouf", "comment", "connexion", "counter", "custom", "dashboard", "data", "ddos", "discord", "download", "fails", "fake", "fast", "fortnite", "forum", "fre", "frre", "game", "get", "github", "good", "gratis", "gratuit", "gta", "hackforums", "host", "http", "instagram", "instan", "internet", "kahoot", "kopen", "kostenlos", "list", "login", "lifetime", "link", "linux", "mac", "make", "meaning", "method", "minecraft", "mobile", "names", "network", "oanel", "online", "offline", "ofline", "paid", "panal", "pane", "panel", "painel", "pan", "panal", "panl", "panle", "pannel", "pannle", "paypal", "pay", "paysafecard", "pc", "phone", "plan", "playstation", "port", "ports", "powerful", "program", "protection", "ps", "ps3", "ps4", "python", "reddit", "register", "reviews", "router", "security", "server", "service", "site", "sites", "software", "source", "stop", "strong", "strongest", "subtle", "system", "test", "tiktok", "tool", "top", "trial", "tutorial", "undisclosed", "url", "use", "username", "virtual", "vpn", "vps", "web", "website", "wifi", "windows", "working", "xbox", "yahoo", "youtube", "zoom")
+
+# Identify booters
+# df_booters <- df_searches_bigrams_sw |> 
+#   # Filter by bigrams containing specific strings
+#   filter(str_detect(
+#     string = bigram,
+#     pattern = "booter|stresser"
+#   )) |> 
+#   # Filter out bigrams containing stopwords
+#   filter(str_detect(
+#     string = bigram,
+#     pattern = str_c(v_stopwords_booter, collapse = "|"),
+#     negate = TRUE
+#   )) |> 
+#   count(campaign_n, bigram, sort = TRUE) |> 
+#   # Identify unique potential booters across campaigns
+#   group_by(bigram) |> 
+#   summarize(total_n = sum(n)) |> 
+#   arrange(desc(total_n)) |> 
+#   rownames_to_column(var = "id")
+```
+
+```{r}
+#| label: export-booters
+#| eval: false
+
+# df_booters |> write_csv(file = here("output", "data", "df_booters.csv"))
+```
+
+```{r}
+#| label: import-booters
+
+# Through online observation we manually collected additional data for `df_booters.csv` and re-loaded the new dataset as `df_booters_` in lines
+
+# Booters data in `.xslx`
+# df_booters_ <- readxl::read_excel(
+#   path = here("data", "df_booters_.xlsx")
+# ) |> 
+#   filter(total_n > 4)
+```
+
+```{r}
+#| label: booter-detect
+
+# df_booters_summary <- df_booters_ |> 
+#   summarise(
+#     # Count potential booters
+#     is_booter_n = sum(is_booter),
+#     is_booter_p = (is_booter_n / n()) * 100,
+#     # Count unique booters
+#     url_unique_n = n_distinct(url, na.rm = TRUE),
+#     url_unique_p = (url_unique_n / n()) * 100,
+#     # Count booters taken down
+#     poweroff_n = df_booters_ |> 
+#       filter(poweroff == 1) |> 
+#       distinct(url) |> nrow(),
+#     poweroff_p = (poweroff_n / n()) * 100,
+#     # Count active booters
+#     is_active_unique_n = df_booters_ |> 
+#       filter(is_active == 1) |> 
+#       distinct(url) |> nrow(),
+#     is_active_unique_p = (is_active_unique_n / n()) * 100
+#   ) |> 
+#   mutate(across(
+#     .cols = everything(),
+#     .fn = ~ round(., digits = 1)
+#   ))
+```
+
+# Discussion
+
+## Ethical considerations
+
+## Limitations
+
+# Future research
+
+# Appendix A 
+
+```{r}
+#| label: keywords-list
+
+# Vector of keywords in the first campaign
+v_keywords_one <- df_searches |> 
+  filter(campaign_n == "one") |>
+  distinct(keyword) |> 
+  pull()
+# Vector of keywords in the second campaign
+v_keywords_two <- df_searches |> 
+  filter(campaign_n == "two") |>
+  distinct(keyword) |> 
+  pull()
+
+# Define cut-off points
+n_searches <- df_searches |> distinct(keyword) |> nrow()
+n_25 <- n_searches / 4
+n_50 <- n_searches / 2
+n_75 <- (n_searches / 4) + (n_searches / 2)
+
+# Divide the searches across four columns
+tbl_keywords <- tibble(
+  keywords_25 = df_searches |> distinct(keyword) |> slice(1:n_25) |> pull(),
+  keywords_50 = df_searches |> distinct(keyword) |> slice((n_25 + 1):n_50) |> pull(),
+  keywords_75 = df_searches |> distinct(keyword) |> slice((n_50 + 1):n_75) |> pull(),
+  keywords_00 = df_searches |> distinct(keyword) |> slice((n_75 + 1):n()) |> pull()
+) |> 
+  # Identify to which campaign belongs each keyword
+  mutate(
+    id_25 = 1:n_25,
+    campaign_25 = case_when(
+      keywords_25 %in% v_keywords_one & keywords_25 %in% v_keywords_two ~ "both",
+      keywords_25 %in% v_keywords_one ~ "first",
+      keywords_25 %in% v_keywords_two ~ "second",
+    ),
+    id_50 = (n_25 + 1):n_50,
+    campaign_50 = case_when(
+      keywords_50 %in% v_keywords_one & keywords_50 %in% v_keywords_two ~ "both",
+      keywords_50 %in% v_keywords_one ~ "first",
+      keywords_50 %in% v_keywords_two ~ "second",
+    ),
+    id_75 = (n_50 + 1):n_75,
+    campaign_75 = case_when(
+      keywords_75 %in% v_keywords_one & keywords_75 %in% v_keywords_two ~ "both",
+      keywords_75 %in% v_keywords_one ~ "first",
+      keywords_75 %in% v_keywords_two ~ "second",
+    ),
+    id_00 = (n_75 + 1):n_searches,
+    campaign_00 = case_when(
+      keywords_00 %in% v_keywords_one & keywords_00 %in% v_keywords_two ~ "both",
+      keywords_00 %in% v_keywords_one ~ "first",
+      keywords_00 %in% v_keywords_two ~ "second",
+    )
+  )
+```
+
+```{r}
+#| label: tbl-keywords-list
+#| tbl-cap: List of keywords per campaign
+
+# Present the keywords in a table
+tbl_keywords |> 
+  select(
+    id_25,
+    keywords_25,
+    campaign_25,
+    id_50,
+    keywords_50,
+    campaign_50,
+    id_75,
+    keywords_75,
+    campaign_75,
+    id_00,
+    keywords_00,
+    campaign_00
+  ) |> 
+  kable(col.names = rep(x = c("ID", "Keyword", "Campaign"), times = 4)) |> 
+  # Footnote about keyword matches
+  footnote(
+    general = "The different annotations around keywords mean that they are intended to match user searches in specific ways. Keywords preceded by '+' seek *broad matches*; keywords surrounded by double '\"\"' seek *phrase matches*; and keywords wrapped around '[]' seek exact matches. For details on the different types of matches, see [@google2023] (https://support.google.com/google-ads/answer/2472708).",
+    threeparttable = TRUE,
+    footnote_as_chunk = TRUE
+  )
+```
+
+# Appendix B {#sec-appendix-b}
+
+# References {.unnumbered}
+
+```{r}
+#| label: session
+#| eval: false
+
+sessionInfo()
+
+# R version 4.3.2 (2023-10-31 ucrt)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 19045)
+# 
+# Matrix products: default
+# 
+# 
+# locale:
+# [1] LC_COLLATE=English_United States.utf8  LC_CTYPE=English_United States.utf8   
+# [3] LC_MONETARY=English_United States.utf8 LC_NUMERIC=C                          
+# [5] LC_TIME=English_United States.utf8    
+# 
+# time zone: Europe/Amsterdam
+# tzcode source: internal
+# 
+# attached base packages:
+# [1] stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#  [1] lubridate_1.9.3  forcats_1.0.0    stringr_1.5.1    dplyr_1.1.4      purrr_1.0.2      readr_2.1.5     
+#  [7] tidyr_1.3.1      tibble_3.2.1     tidyverse_2.0.0  tidytext_0.4.2   patchwork_1.2.0  kableExtra_1.4.0
+# [13] knitr_1.45       janitor_2.2.0    igraph_2.0.3     here_1.0.1       ggraph_2.2.1     ggplot2_3.5.1   
+# [19] cld3_1.6.0       cld2_1.2.4       broom_1.0.5     
+# 
+# loaded via a namespace (and not attached):
+#  [1] tidyselect_1.2.1   viridisLite_0.4.2  farver_2.1.1       viridis_0.6.5      fastmap_1.1.1     
+#  [6] tweenr_2.0.3       janeaustenr_1.0.0  digest_0.6.35      timechange_0.3.0   lifecycle_1.0.4   
+# [11] tokenizers_0.3.0   magrittr_2.0.3     compiler_4.3.2     sass_0.4.9         rlang_1.1.3       
+# [16] tools_4.3.2        utf8_1.2.4         labeling_0.4.3     graphlayouts_1.1.1 bit_4.0.5         
+# [21] xml2_1.3.6         pkgload_1.3.4      withr_3.0.0        grid_4.3.2         polyclip_1.10-6   
+# [26] fansi_1.0.6        colorspace_2.1-0   scales_1.3.0       MASS_7.3-60.0.1    cli_3.6.2         
+# [31] rmarkdown_2.26     crayon_1.5.2       ragg_1.3.0         generics_0.1.3     rstudioapi_0.16.0 
+# [36] tzdb_0.4.0         readxl_1.4.3       cachem_1.0.8       ggforce_0.4.2      parallel_4.3.2    
+# [41] cellranger_1.1.0   vctrs_0.6.5        Matrix_1.6-5       jsonlite_1.8.8     hms_1.1.3         
+# [46] bit64_4.0.5        ggrepel_0.9.5      systemfonts_1.0.6  jquerylib_0.1.4    glue_1.7.0        
+# [51] stringi_1.8.3      gtable_0.3.5       munsell_0.5.1      pillar_1.9.0       htmltools_0.5.8.1 
+# [56] R6_2.5.1           textshaping_0.3.7  tidygraph_1.3.1    rprojroot_2.0.4    vroom_1.6.5       
+# [61] evaluate_0.23      lattice_0.22-6     highr_0.10         backports_1.4.1    SnowballC_0.7.1   
+# [66] memoise_2.0.1      snakecase_0.11.1   bslib_0.7.0        Rcpp_1.0.12        svglite_2.1.3     
+# [71] gridExtra_2.3      xfun_0.43          pkgconfig_2.0.3   
+```
